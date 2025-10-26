@@ -9,7 +9,7 @@ The MIT License (MIT)
 Copyright (c) 2015-2021 Susam Pal
 
 Permission is hereby granted, free of charge, to any person obtaining
- a copy of this software and associated documentation files (the
+a copy of this software and associated documentation files (the
 "Software"), to deal in the Software without restriction, including
 without limitation the rights to use, copy, modify, merge, publish,
 distribute, sublicense, and/or sell copies of the Software, and to
@@ -75,6 +75,7 @@ Check if two null-terminated byte strings are equal.
 */
 #define streq(a, b) (strcmp(a, b) == 0)
 
+
 /**
 Copy null-terminated byte string into a character array.
 
@@ -85,6 +86,7 @@ Copy null-terminated byte string into a character array.
 @return a
 */
 #define strcp(a, b, c) (a[0] = '\0', strncat(a, b, c - 1))
+
 
 /**
 Convert all characters of a string to lowercase.
@@ -100,6 +102,7 @@ char *strlower(char *s)
         s[i] = (char) tolower(s[i]);
     return s;
 }
+
 
 /**
 Return name of the leaf directory or file in the specified path.
@@ -117,13 +120,14 @@ is returned.
 const char *basename(const char *path)
 {
     const char *base;
-    if ((base = strrchr(path, '\')) != NULL)
+    if ((base = strrchr(path, '\\')) != NULL)
         return base + 1;
     else if ((base = strrchr(path, '/')) != NULL)
         return base + 1;
     else
         return path;
 }
+
 
 /**
 Values returned by a function to indicate success or failure.
@@ -136,6 +140,7 @@ enum action {
     EXIT, /**< Successful operation; program should exit normally. */
     FAIL  /**< Failed operation; program should exit with error. */
 };
+
 
 /**
 Global state of this program.
@@ -156,6 +161,7 @@ struct state {
     int capsAsCtrlEnabled;   /**< Whether the caps-as-ctrl behavior is enabled (via CLI). */
 } my; /**< Global state of this program. */
 
+
 /**
 Output error message on the standard error stream.
 
@@ -175,18 +181,13 @@ int error(const char *format, ...)
     return EXIT_FAILURE;
 }
 
-#define LOG_FMT \
-    "% -10s %3d %5lu %3lu " \
-    "%3lu (%#04lx) %3lu (%#04lx) " \
-    "[%s%s%s%s%s%s%s]\n"
+
+#define LOG_FMT \n    "% -10s %3d %5lu %3lu " \n    "%3lu (%#04lx) %3lu (%#04lx) " \n    "[%s%s%s%s%s%s%s]\n"
+
 /**
 Log details of a key stroke to a specified file.
 */
-#define logKeyTo(file) \
-            fprintf(file, LOG_FMT, \
-                    wParamStr, nCode, p->dwExtraInfo, p->flags, \
-                    p->scanCode, p->scanCode, p->vkCode, p->vkCode, \
-                    vkStr, upStr, extStr, altStr, lowStr, injStr, uncapStr)
+#define logKeyTo(file) \n            fprintf(file, LOG_FMT, \n                    wParamStr, nCode, p->dwExtraInfo, p->flags, \n                    p->scanCode, p->scanCode, p->vkCode, p->vkCode, \n                    vkStr, upStr, extStr, altStr, lowStr, injStr, uncapStr)
 
 /**
 Log details of a key stroke.
@@ -279,12 +280,9 @@ void logKey(int nCode, WPARAM wParam, LPARAM lParam)
     fflush(NULL);
 }
 
+
 /**
 Map one key to another key.
-
-@param nCode  Code used to determine how to process the message.
-@param wParam Identifier of the keyboard message.
-@param lParam Pointer to KBDLLHOOKSTRUCT structure.
 
 @return 1 if the keyboard message is processed, i.e. a key is mapped to
         another key, otherwise call CallNextHookEx and return the value
@@ -300,6 +298,78 @@ LRESULT CALLBACK keyboardHook(int nCode, WPARAM wParam, LPARAM lParam)
         logKey(nCode, wParam, lParam);
     }
 
+    /*
+     New behavior (enabled only when capsAsCtrlEnabled is set):
+     - If Caps Lock pressed: delay processing (swallow KEYDOWN).
+     - If another key is pressed while capsDown: inject LCTRL down once and mark capsUsedAsCtrl.
+     - On Caps release: if capsUsedAsCtrl then inject LCTRL up; else treat as tap -> emit ESC (down+up).
+    */
+
+    /* Handle Caps Lock special behavior (only for hardware events) if enabled. */
+    if (my.capsAsCtrlEnabled && keyCode == VK_CAPITAL && p->dwExtraInfo != UNCAP_INFO && nCode >= 0) {
+        if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+            if (!my.capsDown) {
+                /* Record that Caps is down and swallow the physical press for now. */
+                my.capsDown = 1;
+                my.capsUsedAsCtrl = 0;
+                return 1; /* swallow */
+            }
+        } else if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
+            if (my.capsUsedAsCtrl) {
+                /* Caps was used as Ctrl: release injected Ctrl and swallow Caps. */
+                if (my.capsCtrlInjected) {
+                    INPUT inputs[1];
+                    ZeroMemory(&inputs, sizeof inputs);
+                    inputs[0].type = INPUT_KEYBOARD;
+                    inputs[0].ki.wVk = VK_LCONTROL;
+                    inputs[0].ki.dwFlags = KEYEVENTF_KEYUP;
+                    inputs[0].ki.dwExtraInfo = UNCAP_INFO;
+                    SendInput(1, inputs, sizeof *inputs);
+                    my.capsCtrlInjected = 0;
+                }
+                my.capsDown = 0;
+                my.capsUsedAsCtrl = 0;
+                return 1; /* swallow */
+            } else {
+                /* Caps was tapped alone: emit ESC (keydown + keyup) and swallow Caps. */
+                INPUT inputs[2];
+                ZeroMemory(&inputs, sizeof inputs);
+
+                /* ESC down */
+                inputs[0].type = INPUT_KEYBOARD;
+                inputs[0].ki.wVk = VK_ESCAPE;
+                inputs[0].ki.dwFlags = 0;
+                inputs[0].ki.dwExtraInfo = UNCAP_INFO;
+                /* ESC up */
+                inputs[1] = inputs[0];
+                inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+
+                SendInput(2, inputs, sizeof *inputs);
+                my.capsDown = 0;
+                return 1; /* swallow */
+            }
+        }
+    }
+
+    /* If Caps-as-Ctrl is enabled and Caps is held and another keydown occurs, inject Ctrl down once. */
+    if (my.capsAsCtrlEnabled && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) &&
+        my.capsDown && keyCode != VK_CAPITAL && p->dwExtraInfo != UNCAP_INFO &&
+        nCode >= 0) {
+        if (!my.capsUsedAsCtrl) {
+            INPUT inputs[1];
+            ZeroMemory(&inputs, sizeof inputs);
+            inputs[0].type = INPUT_KEYBOARD;
+            inputs[0].ki.wVk = VK_LCONTROL;
+            inputs[0].ki.dwFlags = 0; /* key down */
+            inputs[0].ki.dwExtraInfo = UNCAP_INFO;
+            SendInput(1, inputs, sizeof *inputs);
+            my.capsCtrlInjected = 1;
+            my.capsUsedAsCtrl = 1;
+        }
+        /* Continue processing this other key normally (it will now behave as if Ctrl is held). */
+    }
+
+    /* Existing mapping behavior (unchanged). */
     if (mapCode == 0) {
         /* If key pressed is unmapped, disable the key press. */
         return 1;
@@ -307,15 +377,12 @@ LRESULT CALLBACK keyboardHook(int nCode, WPARAM wParam, LPARAM lParam)
                nCode >= 0) {
         /* If key is mapped, translate it to what it is mapped to. */
         INPUT inputs[1];
-        PKEYBDINPUT ki = &inputs[0].ki;
-
+        ZeroMemory(&inputs, sizeof inputs);
         inputs[0].type = INPUT_KEYBOARD;
-        ki->time = ki->wScan = 0;
-
-        ki->wVk = mapCode;
-        ki->dwFlags = (wParam == WM_KEYUP || wParam == WM_SYSKEYUP)
+        inputs[0].ki.wVk = mapCode;
+        inputs[0].ki.dwFlags = (wParam == WM_KEYUP || wParam == WM_SYSKEYUP)
                       ? KEYEVENTF_KEYUP : 0;
-        ki->dwExtraInfo = UNCAP_INFO;
+        inputs[0].ki.dwExtraInfo = UNCAP_INFO;
 
         SendInput(1, inputs, sizeof *inputs);
         return 1;
@@ -323,6 +390,7 @@ LRESULT CALLBACK keyboardHook(int nCode, WPARAM wParam, LPARAM lParam)
 
     return CallNextHookEx(my.hook, nCode, wParam, lParam);
 }
+
 
 /**
 Kill other running instances of this program.
@@ -346,16 +414,15 @@ enum action kill(void)
     /* Take a snapshot of all processes running on the system. */
     snapshotHandle = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshotHandle == NULL) {
-        sprintf(my.error, "Cannot take snapshot of processes; ",
-                          "error: %lu.", GetLastError());
+        sprintf(my.error, "Cannot take snapshot of processes; error: %lu.", GetLastError());
         return FAIL;
     }
 
     /* Begin iterating through each process in the snapshot. */
     entry.dwSize = sizeof entry;
     if (!Process32First(snapshotHandle, &entry)) {
-        sprintf(my.error, "Cannot retrieve process from snapshot; ",
-                          "error: %lu.", GetLastError());
+        sprintf(my.error, "Cannot retrieve process from snapshot; error: %lu.", GetLastError());
+        CloseHandle(snapshotHandle);
         return FAIL;
     }
 
@@ -392,10 +459,9 @@ enum action kill(void)
         /* Terminate another instance of this program. */
         if (TerminateProcess(processHandle, 0)) {
             printf("Terminated %s (PID %lu).\n",
-                   entry.szExeFile, entry.th32ProcessID, GetLastError());
+                   entry.szExeFile, entry.th32ProcessID);
         } else {
-            error("Cannot terminate %s (PID %lu); error %lu.\n",
-                  entry.szExeFile, entry.th32ProcessID, GetLastError());
+            error("Cannot terminate %s (PID %lu); error %lu.\n",\n                  entry.szExeFile, entry.th32ProcessID, GetLastError());
             failure = 1;
         }
         CloseHandle(processHandle);
@@ -405,8 +471,7 @@ enum action kill(void)
     CloseHandle(snapshotHandle);
 
     if (failure) {
-        sprintf(my.error, "Failed to terminate all running instances "
-                          "of %s.", myExeFile);
+        sprintf(my.error, "Failed to terminate all running instances of %s.", myExeFile);
         return FAIL;
     }
 
@@ -457,222 +522,4 @@ void showHelp(void)
     printf(details);
 }
 
-/**
-Show version and copyright details of this program.
-*/
-void showVersion(void)
-{
-    char name[MAX_ARG_LEN];
-
-    const char *s =
-    "%s " VERSION "\n"
-    COPYRIGHT "\n\n"
-
-    "This is free and open source software. You can use, copy, modify,\n"
-    "merge, publish, distribute, sublicense, and/or sell copies of it,\n"
-    "under the terms of the MIT License. You can obtain a copy of the\n"
-    "MIT License at " LICENSE_URL ".\n\n"
-
-    "This software is provided \"AS IS\", WITHOUT WARRANTY OF ANY KIND,\n"
-    "express or implied. See the MIT License for details.\n";
-
-    strcpy(name, my.name);
-    name[0] = (char) toupper(name[0]);
-    printf(s, name);
-}
-
-/**
-Output love.
-*/
-void qtpi(void)
-{
-    const int show[] = {'.', '@', ' ', '\n'};
-    const int love[] = {
-        252, 7, 252, 7, 72, 6, 29, 6, 36, 6, 29,
-        6,  72, 7, 60, 6,  17, 22, 17, 6, 12, 6,
-
-              17, 22,           17,  6,
-           60, 7, 52, 6,     13,  46,  13,
-         6, 13, 46, 13, 6, 52, 7, 48, 6, 13,
-        62, 5, 62, 13,  6, 48,  7, 48, 6, 13,
-        18, 1, 70, 13,  6, 48,  7, 48, 6, 13,
-        126, 13, 6, 48, 7, 52, 6, 13,  38, 2,
-         38, 13, 6,  52, 7,  60, 6,  17, 94,
-           17, 6,  60, 7,  72, 6,  17, 22,
-              3, 18,  17, 6, 72, 7, 84,
-                 6, 17,  46,  17, 6,
-                    84, 7, 96, 6,
-                       17, 22,
-                         17,
-
-        6, 96, 7, 108, 6,  13, 6, 13, 6, 108, 7,
-        120,  6, 5,  6, 120, 7,  252, 7, 252, 7,
-    };
-    const char *say[] = {"", "Cutie Pai,", "I love you!", "-- Susam"};
-    size_t i;
-    int j;
-    for (i = 0; i < sizeof love / sizeof *love; i++) {
-        if (love[i] < 4)
-            printf(say[love[i]]);
-        else
-            for (j = 0; j < love[i] / 4; j++)
-                putchar(show[love[i] % 4]);
-    }
-}
-
-/**
-Parse command line arguments.
-
-@param argc Argument count
-@param argv Argument vector
-
-@return Next action to take based on whether parsing of command line
-        arguments was successful or not. GOOD is returned if command
-        line arguments were parsed successfully and the program should
-        continue. EXIT is returned if command line arguments were parsed
-        and processed successfully and the program should exit. FAIL is
-        returned if an error was found in command line arguments.
-*/
-enum action parseArguments(int argc, const char **argv)
-{
-    int i;
-
-    /* Set default values. */
-    strcp(my.name, basename(argv[0]), sizeof my.name);
-
-    for (i = 0; i < (int) (sizeof my.keymap / sizeof *my.keymap); i++)
-        my.keymap[i] = (WORD) i;
-
-    my.keymap[VK_CAPITAL] = VK_ESCAPE;
-
-    my.console = 0;
-    my.debug = 0;
-    my.file = NULL;
-
-    /* Initialize new Caps state flags */
-    my.capsDown = 0;
-    my.capsUsedAsCtrl = 0;
-    my.capsCtrlInjected = 0;
-    /* caps-as-ctrl is OFF by default to preserve original behavior */
-    my.capsAsCtrlEnabled = 0;
-
-    /* Parse command line options. */
-    i = 1;
-    while (i < argc) {
-        const char *arg = argv[i];
-        if (streq(arg, "-h") || streq(arg, "--help")) {
-            showHelp();
-            return EXIT;
-        } else if (streq(arg, "-v") || streq(arg, "--version")) {
-            showVersion();
-            return EXIT;
-        } else if (streq(arg, "--qtpi")) {
-            qtpi();
-            return EXIT;
-        } else if (streq(arg, "-c") || streq(arg, "--console")) {
-            my.console = 1;
-            ++i;
-        } else if (streq(arg, "-d") || streq(arg, "--debug")) {
-            my.debug = 1;
-            ++i;
-        } else if (streq(arg, "-f") || streq(arg, "--file")) {
-            if (i == argc - 1) {
-                sprintf(my.error, "Option '%.*s' must be followed by "
-                                  "file path", MAX_ARG_LEN, arg);
-                return FAIL;
-            }
-            arg = argv[++i];
-            if ((my.file = fopen(arg, "a")) == NULL) {
-                sprintf(my.error, "Cannot open %.*s.", MAX_ARG_LEN, arg);
-                return FAIL;
-            }
-            ++i;
-        } else if (streq(arg, "-k") || streq(arg, "--kill")) {
-            return kill();
-        } else if (streq(arg, "--caps-as-ctrl")) {
-            my.capsAsCtrlEnabled = 1;
-            ++i;
-        } else if (streq(arg, "--no-caps-as-ctrl")) {
-            my.capsAsCtrlEnabled = 0;
-            ++i;
-        } else if (streq(arg, "--")) {
-            ++i;
-            break;
-        } else if (arg[0] == '-' && arg[1] != 0) {
-            sprintf(my.error, "Unknown option '%.*s'.", MAX_ARG_LEN, arg);
-            return FAIL;
-        } else {
-            break;
-        }
-    }
-
-    /* Parse command line options. */
-    while (i < argc) {
-        const char *arg = argv[i];
-        char *colon;
-        unsigned long int mapKey;
-        unsigned long int toKey;
-
-        if ((colon = strchr(arg, ':')) == NULL) {
-            sprintf(my.error, "Colon is missing from argument '%.*s'.",
-                    MAX_ARG_LEN, arg);
-            return FAIL;
-        }
-
-        mapKey = strtoul(arg, NULL, 0);
-        toKey = strtoul(colon + 1, NULL, 0);
-
-        if (mapKey < 1 || mapKey > 254 || toKey > 254) {
-            sprintf(my.error, "Invalid key code in argument '%.*s'.",
-                    MAX_ARG_LEN, arg);
-            return FAIL;
-        }
-
-        my.keymap[mapKey] = (WORD) toKey;
-        ++i;
-    }
-
-    /* Command line arguments parsed successfully. */
-    return GOOD;
-}
-
-/**
-Start the program.
-
-@param argc Argument count.
-@param argv Argument vector.
-
-@return EXIT_SUCCESS if the program terminates normally;
-        EXIT_FAILURE if an error occurs.
-*/
-int main(int argc, char **argv)
-{
-    enum action a;
-    MSG msg;
-
-    /* Parse command line arguments. */
-    if ((a = parseArguments(argc, (const char **) argv)) == FAIL)
-        return error(my.error);
-    else if (a == EXIT)
-        return EXIT_SUCCESS;
-
-    /* Set visibility of console. */
-    if (!my.console && !my.debug) {
-        HWND h = GetConsoleWindow();
-        if (h != NULL)
-            ShowWindow(h, SW_HIDE);
-        else
-            error("Cannot find console window; error %lu.", GetLastError());
-    }
-
-    /* Install hook to monitor low-level keyboard input events. */
-    my.hook = SetWindowsHookEx(WH_KEYBOARD_LL, keyboardHook, NULL, 0);
-    if (my.hook == NULL)
-        return error("Cannot install hook; error %lu.", GetLastError());
-
-    /* Begin message delivery. */
-    if (GetMessage(&msg, NULL, 0, 0) == -1)
-        return error("Cannot retrieve message; error %lu.", GetLastError());
-
-    return EXIT_SUCCESS;
-}
+/** end of file */
