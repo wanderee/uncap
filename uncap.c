@@ -1,4 +1,4 @@
-/**
+/*
 @file
 @mainpage
 
@@ -9,7 +9,7 @@ The MIT License (MIT)
 Copyright (c) 2015-2021 Susam Pal
 
 Permission is hereby granted, free of charge, to any person obtaining
-a copy of this software and associated documentation files (the
+ a copy of this software and associated documentation files (the
 "Software"), to deal in the Software without restriction, including
 without limitation the rights to use, copy, modify, merge, publish,
 distribute, sublicense, and/or sell copies of the Software, and to
@@ -33,7 +33,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <ctype.h>
 #include <windows.h>
 #include <tlhelp32.h>
-
+#include <string.h>
+#include <stdarg.h>
 
 /** Version of the program. */
 #define VERSION "0.4.0-dev"
@@ -74,7 +75,6 @@ Check if two null-terminated byte strings are equal.
 */
 #define streq(a, b) (strcmp(a, b) == 0)
 
-
 /**
 Copy null-terminated byte string into a character array.
 
@@ -85,7 +85,6 @@ Copy null-terminated byte string into a character array.
 @return a
 */
 #define strcp(a, b, c) (a[0] = '\0', strncat(a, b, c - 1))
-
 
 /**
 Convert all characters of a string to lowercase.
@@ -101,7 +100,6 @@ char *strlower(char *s)
         s[i] = (char) tolower(s[i]);
     return s;
 }
-
 
 /**
 Return name of the leaf directory or file in the specified path.
@@ -119,14 +117,13 @@ is returned.
 const char *basename(const char *path)
 {
     const char *base;
-    if ((base = strrchr(path, '\\')) != NULL)
+    if ((base = strrchr(path, '\')) != NULL)
         return base + 1;
     else if ((base = strrchr(path, '/')) != NULL)
         return base + 1;
     else
         return path;
 }
-
 
 /**
 Values returned by a function to indicate success or failure.
@@ -140,7 +137,6 @@ enum action {
     FAIL  /**< Failed operation; program should exit with error. */
 };
 
-
 /**
 Global state of this program.
 */
@@ -152,8 +148,13 @@ struct state {
     int debug;               /**< Whether verbose mode is enabled. */
     FILE *file;              /**< File to write verbose logs to. */
     char error[MAX_ERR_LEN]; /**< Error message for failed operation. */
-} my; /**< Global state of this program. */
 
+    /* New fields to support "Caps acting as Ctrl when used with other keys" */
+    int capsDown;            /**< Caps is currently held down (pressed). */
+    int capsUsedAsCtrl;      /**< Caps was used as Ctrl (other key pressed while caps held). */
+    int capsCtrlInjected;    /**< We injected a Ctrl down; need to inject Ctrl up on release. */
+    int capsAsCtrlEnabled;   /**< Whether the caps-as-ctrl behavior is enabled (via CLI). */
+} my; /**< Global state of this program. */
 
 /**
 Output error message on the standard error stream.
@@ -170,21 +171,16 @@ int error(const char *format, ...)
     va_start(ap, format);
     fprintf(stderr, "%s: ", my.name);
     vfprintf(stderr, format, ap);
+    va_end(ap);
     return EXIT_FAILURE;
 }
 
-
-/** Log format string. */
 #define LOG_FMT \
-    "%-10s %3d %5lu %3lu " \
+    "% -10s %3d %5lu %3lu " \
     "%3lu (%#04lx) %3lu (%#04lx) " \
     "[%s%s%s%s%s%s%s]\n"
-
-
 /**
 Log details of a key stroke to a specified file.
-
-@param file File to write to. (type: FILE *)
 */
 #define logKeyTo(file) \
             fprintf(file, LOG_FMT, \
@@ -228,6 +224,10 @@ void logKey(int nCode, WPARAM wParam, LPARAM lParam)
 
     case WM_SYSKEYUP:
         strcpy(wParamStr, "SYSKEYUP");
+        break;
+
+    default:
+        strcpy(wParamStr, "UNKNOWN");
         break;
     }
 
@@ -279,7 +279,6 @@ void logKey(int nCode, WPARAM wParam, LPARAM lParam)
     fflush(NULL);
 }
 
-
 /**
 Map one key to another key.
 
@@ -324,7 +323,6 @@ LRESULT CALLBACK keyboardHook(int nCode, WPARAM wParam, LPARAM lParam)
 
     return CallNextHookEx(my.hook, nCode, wParam, lParam);
 }
-
 
 /**
 Kill other running instances of this program.
@@ -415,7 +413,6 @@ enum action kill(void)
     return EXIT;
 }
 
-
 /**
 Show usage and help details of this program.
 */
@@ -432,10 +429,7 @@ void showHelp(void)
 "overridden by specifying a new mapping for Caps Lock key. Any key\n"
 "may be mapped to any key with one or more MAP_KEY:TO_KEY arguments.\n"
 "Each argument is a colon separated pair of virtual-key codes from\n"
-"<https://msdn.microsoft.com/library/windows/desktop/dd375731.aspx>.\n\n"
-
-"The virtual-key code may be specified either as hexadecimal integer\n"
-"as mentioned in the above URL or its equivalent decimal notation.\n\n";
+"<https://msdn.microsoft.com/library/windows/desktop/dd375731.aspx>.\n\n";
 
     const char *description2 =
 "If MAP_KEY equals TO_KEY, then no mapping occurs for it. If TO_KEY\n"
@@ -448,12 +442,12 @@ void showHelp(void)
 "  -d, --debug      Run verbosely in console.\n"
 "  -f, --file FILE  Write verbose logs to file.\n"
 "  -h, --help       Show this help and exit.\n"
-"  -v, --version    Show version and exit.\n\n"
-
+"  -v, --version    Show version and exit.\n"
+"  --caps-as-ctrl   Enable Caps-as-Ctrl behavior (hold Caps + other key -> Ctrl).\n"
+"  --no-caps-as-ctrl Disable Caps-as-Ctrl behavior (default).\n\n"
 "Arguments:\n"
 "  MAP_KEY          Virtual-key code of key to map.\n"
 "  TO_KEY           Virtual-key code of key to map to.\n\n"
-
 "Report bugs to " SUPPORT_URL ".\n";
 
     printf(usage, my.name);
@@ -462,7 +456,6 @@ void showHelp(void)
     printf(description2);
     printf(details);
 }
-
 
 /**
 Show version and copyright details of this program.
@@ -487,7 +480,6 @@ void showVersion(void)
     name[0] = (char) toupper(name[0]);
     printf(s, name);
 }
-
 
 /**
 Output love.
@@ -528,7 +520,6 @@ void qtpi(void)
     }
 }
 
-
 /**
 Parse command line arguments.
 
@@ -557,6 +548,13 @@ enum action parseArguments(int argc, const char **argv)
     my.console = 0;
     my.debug = 0;
     my.file = NULL;
+
+    /* Initialize new Caps state flags */
+    my.capsDown = 0;
+    my.capsUsedAsCtrl = 0;
+    my.capsCtrlInjected = 0;
+    /* caps-as-ctrl is OFF by default to preserve original behavior */
+    my.capsAsCtrlEnabled = 0;
 
     /* Parse command line options. */
     i = 1;
@@ -591,6 +589,12 @@ enum action parseArguments(int argc, const char **argv)
             ++i;
         } else if (streq(arg, "-k") || streq(arg, "--kill")) {
             return kill();
+        } else if (streq(arg, "--caps-as-ctrl")) {
+            my.capsAsCtrlEnabled = 1;
+            ++i;
+        } else if (streq(arg, "--no-caps-as-ctrl")) {
+            my.capsAsCtrlEnabled = 0;
+            ++i;
         } else if (streq(arg, "--")) {
             ++i;
             break;
@@ -631,7 +635,6 @@ enum action parseArguments(int argc, const char **argv)
     /* Command line arguments parsed successfully. */
     return GOOD;
 }
-
 
 /**
 Start the program.
